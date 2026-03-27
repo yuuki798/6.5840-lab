@@ -8,13 +8,13 @@ package raft
 // raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -76,6 +76,12 @@ func (rf *Raft) GetState() (int, bool) {
 
 func (rf *Raft) persist() {
 	// Your code here (3C).
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	rf.persister.Save(w.Bytes(), nil)
 }
 
 func (rf *Raft) readPersist(data []byte) {
@@ -83,6 +89,20 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (3C).
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		// Error decoding
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 func (rf *Raft) PersistBytes() int {
@@ -144,6 +164,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 		rf.state = Follower
 		reply.Term = rf.currentTerm
 	}
@@ -162,6 +183,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	rf.resetElectionTimer()
 	reply.VoteGranted = true
 }
@@ -206,6 +228,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 		reply.Term = rf.currentTerm
 	}
 	rf.state = Follower
@@ -234,10 +257,12 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 			if rf.log[pos].Term != entry.Term {
 				rf.log = rf.log[:pos]
 				rf.log = append(rf.log, args.Entries[i:]...)
+				rf.persist()
 				break
 			}
 		} else {
 			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -298,6 +323,7 @@ func (rf *Raft) replicateTo(server int) {
 		rf.currentTerm = reply.Term
 		rf.state = Follower
 		rf.votedFor = -1
+		rf.persist()
 		rf.resetElectionTimer()
 		return
 	}
@@ -369,6 +395,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	term := rf.currentTerm
 	rf.log = append(rf.log, LogEntry{Term: term, Command: command})
+	rf.persist()
 	index := len(rf.log) - 1
 	rf.matchIndex[rf.me] = index
 	// Replicate to followers immediately (non-blocking)
@@ -383,6 +410,7 @@ func (rf *Raft) startElection() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.resetElectionTimer()
 	term := rf.currentTerm
 	lastIdx, lastTerm := rf.lastLogInfo()
@@ -414,6 +442,7 @@ func (rf *Raft) startElection() {
 				rf.currentTerm = reply.Term
 				rf.state = Follower
 				rf.votedFor = -1
+				rf.persist()
 				rf.resetElectionTimer()
 				return
 			}
@@ -485,13 +514,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.applyCh = applyCh
 
-	rf.readPersist(persister.ReadRaftState())
 	rf.votedFor = -1
 	rf.state = Follower
 	rf.currentTerm = 0
-	rf.resetElectionTimer()
-
 	rf.log = []LogEntry{{Term: 0}}
+
+	rf.readPersist(persister.ReadRaftState())
+
+	rf.resetElectionTimer()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
